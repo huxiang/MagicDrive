@@ -1,0 +1,3 @@
+ShareFolder,Username,Password,ImagePath
+# \\team-filer.example.com\Public,guest,password,\ISO\Windows
+# \\company-filer\OS-Images,,,\OS\Windows;\Vol2\microsoft

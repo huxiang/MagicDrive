@@ -1,0 +1,419 @@
+#!/usr/bin/env python
+#
+# python 2 script
+
+import os
+import re
+import sys
+import glob
+import platform
+import subprocess
+
+# Initial Cofig
+mdDataLocation = '/gitlab/ws-multi-boot/Data'
+grubVolSize = 128  # MB
+winpeVolSize = 1024  # MB
+
+
+def isUserAdmin():
+
+   if os.name == 'posix':
+      return os.getuid() == 0
+   else:
+      print 'Unsupported OS for this function: %s' % (os.name)
+
+
+def runCmd(cmd=None):
+
+   if cmd is None:
+      return None
+
+   p = subprocess.Popen(
+       cmd,
+       stdout=subprocess.PIPE,
+       stderr=subprocess.STDOUT,
+       shell=True)
+   (output, err) = p.communicate()
+   p_status = p.wait()
+   return (p_status, output)
+
+
+def getFriendlySize(size):
+
+   if type(size) is not int and type(size) is not long:
+      return size
+
+   sizeInKB = size / 1024
+   sizeInMB = sizeInKB / 1024
+   sizeInGB = sizeInMB / 1024
+   sizeInTB = sizeInGB / 1024
+   sizeInPB = sizeInTB / 1024
+
+   if sizeInPB > 1:
+      return '%s PB' % str(sizeInPB)
+   elif sizeInTB > 1:
+      return '%s TB' % str(sizeInTB)
+   elif sizeInGB > 1:
+      return '%s GB' % str(sizeInGB)
+   elif sizeInMB > 1:
+      return '%s MB' % str(sizeInMB)
+   elif sizeInKB > 1:
+      return '%s KB' % str(sizeInKB)
+   else:
+      return '%s bytes' % str(size)
+
+
+def getDiskSize(diskDevFile):
+
+   if diskDevFile is None or (not re.match(r'^/dev/sd[a-z]$', diskDevFile)):
+      return None
+
+   (rc, out) = runCmd('/sbin/fdisk -l %s |/bin/grep %s'
+                      % (diskDevFile, diskDevFile))
+   if rc != 0:
+      return None
+
+   return int(re.findall(r',\s*(\d+)\s*bytes,', out.strip())[0])
+
+
+def getDisksList():
+
+   diskList = ''
+   for diskDevFile in glob.glob('/dev/sd[a-z]'):
+      diskSize = getFriendlySize(getDiskSize(diskDevFile))
+      if diskList == '':
+         diskList += '   %s\t%s' % (diskDevFile, diskSize)
+      else:
+         diskList += '\n   %s\t%s' % (diskDevFile, diskSize)
+
+   return diskList
+
+
+def showUsage():
+
+   diskList = getDisksList()
+   usageText = '''Usage:
+   make_magicdrive DISKDEV [FSTYPE]
+
+where,
+   DISKDEV     Device file of the WHOLE disk which your want to transform
+               it to MagicDrive
+   FSTYPE      File system type of the MagicDrive, it can be nfts or ext4,
+               it is ntfs by default
+
+Example:
+   make_magicdrive /dev/sdb
+   make_magicdrive /dev/sdb ntfs
+   make_magicdrive /dev/sdb ext4
+
+Avaliable Disks:
+%s
+'''
+
+   print usageText % diskList
+   return -1
+
+
+def clearMBR(devFile):
+   instText = '''Warning: [%s] has existing partition(s)!
+
+To transform this device to MagicDrive, its partition table must be re-built.
+
+*** All your data on this device now will be lost!!! ***
+
+Please type "DELETE" and then press [Enter] key to ensure that you have
+understood the risk of this operation.
+Type anything else and press [Enter] key to exit:
+'''
+
+   userInput = raw_input(instText % devFile)
+   if userInput != 'DELETE':
+      print 'Operation cancelled.'
+      return 1
+
+   sys.stdout.write('\nClearing partition table on [%s]...' % devFile)
+   runCmd('/bin/echo -e "o\\nw\\n" |/sbin/fdisk %s' % devFile)
+   runCmd('/sbin/partprobe')
+   print 'Done!'
+
+   if len(glob.glob('%s*' % devFile)) > 1:
+      print '''
+Refresh device files failed.
+
+This system must be rebooted to refresh disk device files.
+Please run the make_magicdrive tool to continue the procedure after rebooted.
+'''
+
+      raw_input('Press [Enter] to reboot...')
+      print "Rebooting..."
+      runCmd('reboot')
+      return 1
+   else:
+      return 0
+
+
+if __name__ == '__main__':
+   system = platform.system()
+   if system != 'Linux':
+      print 'Error: Only Linux is supported by this tool!'
+      exit(-2)
+
+   if platform.dist()[0] != 'Ubuntu':
+      print 'Warning: This tool has only been tested on Ubuntu'
+
+   if not isUserAdmin():
+      print 'Error: Please run this tool as root!'
+      exit(1)
+
+   if len(sys.argv) != 2 and len(sys.argv) != 3:
+      exit(showUsage())
+
+   if not re.match(r'^/dev/sd[a-z]$', sys.argv[1]):
+      print "Error: [%s] is not valid!\n" % sys.argv[1]
+      exit(showUsage())
+   else:
+      mdDevFile = sys.argv[1]
+
+   if len(sys.argv) == 2:
+      mdFsType = 'ntfs'
+   else:    # len(sys.argv) == 3
+      if sys.argv[2].lower() in ['ntfs', 'ext4']:
+         mdFsType = sys.argv[2].lower()
+      else:
+         print "Error: File system type [%s] is not valid!\n" % sys.argv[2]
+         exit(showUsage())
+
+   if (mdDevFile not in glob.glob('/dev/sd[a-z]')):
+      print "Error: [%s] does not exist!" % mdDevFile
+      exit(2)
+
+   minDiskSize = (1024 + grubVolSize + winpeVolSize) * 1024 * 1024  # bytes
+   mdDiskSize = getDiskSize(mdDevFile)
+   if mdDiskSize is None:
+      print "Error: Unable to access device [%s] by fdisk!" % mdDevFile
+      exit(3)
+   elif mdDiskSize < minDiskSize:
+      print "Error: [%s] has only [%s], it is too small :(" \
+         % (mdDevFile, getFriendlySize(mdDiskSize))
+      exit(4)
+
+   (rc, out) = runCmd('/bin/mount |/bin/grep ^%s |/usr/bin/cut -d" " -f1'
+                      % mdDevFile)
+   if out != '':
+      print "Error: [%s] is now mounted!" % re.sub(r'\n', ' ', out.strip())
+      exit(5)
+
+   partitionFound = False
+   (rc, out) = runCmd('/sbin/fdisk -l %s' % mdDevFile)
+   for line in out.split('\n'):
+      if re.match(r'^%s\d+' % mdDevFile, line):
+         partitionFound = True
+         break
+
+   if partitionFound:
+      if (clearMBR(mdDevFile)) != 0:
+         exit(0)
+
+   sys.stdout.write('Creating partitions on [%s]...' % mdDevFile)
+   grubVolSector = grubVolSize * 1024 * 1024 / 512
+   winpeVolSector = winpeVolSize * 1024 * 1024 / 512
+   userVolSector = mdDiskSize / 512 - grubVolSector - winpeVolSector - 2048
+   if mdFsType == 'ntfs':
+      userPartType = '7'    # '7  HPFS/NTFS/exFAT' in fdisk
+   else:    # mdFsType == 'ext4'
+      userPartType = '83'   # '83  Linux' in fdisk
+
+   fdiskCmdList = [
+      'n',   # Create the 1st partition
+      'p',   # It's primary partition
+      '1',   # Partiton number 1
+      '',    # Start sector of partition 1, accept default
+      '+%s' % str(userVolSector),
+      'n',   # Create the 2nd partition
+      'p',   # It's primary partition
+      '2',   # Partiton number 2
+      '',    # Start sector of partition 2, accept default
+      '+%s' % str(grubVolSector),
+      'n',   # Create the 3rd partition
+      'p',   # It's primary partition
+      '3',   # Partiton number 3
+      '',    # Start sector of partition 3, accept default
+      '',    # End sector of partition 3, accept default to use all rest space
+      't',   # Change partition type
+      '1',   # Select partition 1
+      userPartType,
+      't',   # Change partition type
+      '2',   # Select partition 2
+      '1c',  # '1c Hidden W95 FAT32 (LBA)' for grub partition
+      't',   # Change partition type
+      '3',   # Select partition 3
+      '27',  # '27 Hidden NTFS WinRE' partition for WinPE
+      'a',   # Set bootable flag
+      '2',   # Set the flag on grub partition
+      'w',   # Save and exit
+   ]
+
+   fdiskCmd = '\\n'.join(fdiskCmdList) + '\\n'
+   runCmd('/bin/echo -e "%s" |/sbin/fdisk %s' % (fdiskCmd, mdDevFile))
+   print 'Done!'
+
+   userVolDevFile = '%s1' % mdDevFile
+   grubVolDevFile = '%s2' % mdDevFile
+   winpeVolDevFile = '%s3' % mdDevFile
+
+   sys.stdout.write('Creating file system on [%s]...' % userVolDevFile)
+   if mdFsType == 'ntfs':
+      (rc, out) = runCmd('/sbin/mkfs.ntfs -L MagicDrive -Q %s'
+                         % userVolDevFile)
+   else:   # mdFsType == 'ext4'
+      (rc, out) = runCmd('/sbin/mkfs.ext4 -L MagicDrive %s' % userVolDevFile)
+
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   print 'Done!'
+
+   sys.stdout.write('Creating file system on [%s]...' % grubVolDevFile)
+   (rc, out) = runCmd('/sbin/mkfs.vfat -F 32 %s' % grubVolDevFile)
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   print 'Done!'
+
+   sys.stdout.write('Creating file system on [%s]...' % winpeVolDevFile)
+   (rc, out) = runCmd('/sbin/mkfs.ntfs -Q %s' % winpeVolDevFile)
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   print 'Done!'
+
+   sys.stdout.write('Getting file system UUIDs for [%s]...' % userVolDevFile)
+   (rc, out) = runCmd('/usr/sbin/grub-probe --target=fs_uuid --device %s'
+                      % userVolDevFile)
+   userFsuuid = out.strip()
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   print 'Done!'
+
+   sys.stdout.write('Getting file system UUIDs for [%s]...' % grubVolDevFile)
+   (rc, out) = runCmd('/usr/sbin/grub-probe --target=fs_uuid --device %s'
+                      % grubVolDevFile)
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   grubFsuuid = out.strip()
+   print 'Done!'
+
+   sys.stdout.write('Getting file system UUIDs for [%s]...' % winpeVolDevFile)
+   (rc, out) = runCmd('/usr/sbin/grub-probe --target=fs_uuid --device %s'
+                      % winpeVolDevFile)
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   winpeFsuuid = out.strip()
+   print 'Done!'
+
+   for x in xrange(1, 4):
+      x = str(x)
+      sys.stdout.write('Mounting [%s%s] to [/mnt/usb%s]...'
+                       % (mdDevFile, x, x))
+      runCmd('/bin/mkdir /mnt/usb%s' % x)
+      (rc, out) = runCmd('/bin/mount %s%s /mnt/usb%s' % (mdDevFile, x, x))
+      if rc != 0:
+         print 'Failed!'
+         print out
+         exit(rc)
+      print 'Done!'
+
+   sys.stdout.write('Installing grub2 to [%s]...' % grubVolDevFile)
+   (rc, out) = runCmd('/usr/sbin/grub-install --force --no-floppy '
+                      '--boot-directory=/mnt/usb2/boot %s' % mdDevFile)
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+
+   (rc, out) = runCmd('/usr/sbin/grub-install --target x86_64-efi '
+                      '--efi-directory /mnt/usb2 '
+                      '--boot-directory=/mnt/usb2/boot '
+                      '--removable')
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   print 'Done!'
+
+   sys.stdout.write('Writing grub2 config files to [%s]...' % grubVolDevFile)
+   (rc, out) = runCmd('/bin/cp -rf %s/GrubVol/* /mnt/usb2/' % mdDataLocation)
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   grubEnvContent = '''# GRUB Environment Block
+#####################################################################
+usrdata_label=MagicDrive
+usrdata_fsuuid=%s
+grub_fsuuid=%s
+winpe_fsuuid=%s
+   '''
+   try:
+      grubEnvFH = open('/mnt/usb2/boot/grub/grubenv', 'w')
+      grubEnvFH.write(grubEnvContent % (userFsuuid, grubFsuuid, winpeFsuuid))
+      grubEnvFH.close()
+   except Exception, e:
+      print 'Failed!'
+      print e
+      exit(6)
+   print 'Done!'
+
+   sys.stdout.write('Writing WinPE files to [%s]...' % winpeVolDevFile)
+   runCmd('/bin/umount /dev/sr0')
+   runCmd('/bin/mkdir /mnt/cdrom')
+   (rc, out) = runCmd('/bin/mount /dev/sr0 /mnt/cdrom')
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   (rc, out) = runCmd('/bin/cp -rf /mnt/cdrom/* /mnt/usb3/')
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   runCmd('/bin/umount /dev/sr0')
+   print 'Done!'
+
+   sys.stdout.write('Writing user files to [%s]...' % userVolDevFile)
+   (rc, out) = runCmd('/bin/cp -rf %s/UserVol/* /mnt/usb1/' % mdDataLocation)
+   if rc != 0:
+      print 'Failed!'
+      print out
+      exit(rc)
+   markDownFiles = glob.glob('/mnt/usb1/osimages/*/*.md')
+   markDownFiles += glob.glob('/mnt/usb1/PortableTools/*.md')
+   for docSourceFile in markDownFiles:
+      (rc, out) = runCmd('/bin/rm -f %s' % docSourceFile)
+   (rc, out) = runCmd('/bin/chmod -R 777 /mnt/usb1')
+
+   if (mdFsType != 'ntfs'):
+      runCmd('/bin/rm -rf /mnt/usb1/PortableTools')
+      runCmd('/bin/rm -rf /mnt/usb1/osimages/Windows')
+   print 'Done!'
+
+   for x in xrange(1, 4):
+      x = str(x)
+      sys.stdout.write('Umount [%s%s]...' % (mdDevFile, x))
+      (rc, out) = runCmd('/bin/umount %s%s' % (mdDevFile, x))
+      if rc != 0:
+         print 'Failed!'
+         print out
+         exit(rc)
+      print 'Done!'
+
+   print '\nCongratulations! You MagicDrive is ready to use!\n'
