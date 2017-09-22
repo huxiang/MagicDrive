@@ -12,9 +12,11 @@
 
 3. Modify `WinPE\buildPE.bat` file based on your environment and requirements.
 
-4. Right click on the `WinPE\buildPE.bat` file, run it as Administrator.
+4. (Optional) Replace `WinPE\MagicDriveBins\x86\winpe.jpg` and `WinPE\MagicDriveBins\amd64\winpe.jpg` with your own file as WinPE desktop background
 
-5. Just wait for the WinPE image creation completes.
+5. Right click on the `WinPE\buildPE.bat` file, run it as Administrator.
+
+6. Just wait for the WinPE image creation completes.
 
 # Create MagicDrive With A USB Storage Device
 
