@@ -10,7 +10,7 @@ import platform
 import subprocess
 
 # Initial Cofig
-mdDataLocation = '/gitlab/ws-multi-boot/Data'
+mdDataLocation = '/gitlab/MagicDrive/Data'
 grubVolSize = 128  # MB
 winpeVolSize = 1024  # MB
 
